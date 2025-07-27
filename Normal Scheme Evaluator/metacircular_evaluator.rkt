@@ -219,8 +219,8 @@
 
 
 (define (make-procedure parameters body env)
-  (list 'procedure parameters (scan-out-defines body) env)) ; modify "body" -> "(scan-out-defines body)"
-
+  (list 'procedure parameters body env)) ; modify "body" -> "(scan-out-defines body)"
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; REIMPLEMENT THIS LATER
 
 (define (compound-procedure? p)
   (tagged-list? p 'procedure))
@@ -382,6 +382,7 @@
 ;;; mutual requirements
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+#|
 (define (apply2 procedure arguments) ;; new version of "apply" that's distinct from scheme's
   (cond ((primitive-procedure? procedure)
          (apply-primitive-procedure procedure arguments))
@@ -395,96 +396,229 @@
         (else
          (error
           "Unknown procedure type -- APPLY" procedure))))
+|#
 
 
+
+
+
+
+#|
 (define eval-table
-  (make-hash `((set!   . ,(λ (exp env) (eval-assignment exp env)))
-               (define . ,(λ (exp env) (eval-definition exp env)))
-               (if     . ,(λ (exp env) (eval-if exp env)))
+  (make-hash `((set!   . ,(λ (exp env) (eval-assignment exp env))) ;;;;;;;;;;;
+               (define . ,(λ (exp env) (eval-definition exp env))) ;;;;;;;;;;;
+               (if     . ,(λ (exp env) (eval-if exp env))) ;;;;;;;;;;;;;
                (and    . ,(λ (exp env) (eval-and exp env)))
                (or     . ,(λ (exp env) (eval-or exp env)))
-               (lambda . ,(λ (exp env) (make-procedure (lambda-parameters exp)
+               (lambda . ,(λ (exp env) (make-procedure (lambda-parameters exp) ;;;;;;;;;
                                                        (lambda-body exp)
                                                        env)))
                (let    . ,(λ (exp env) (eval (let->combination exp) env)))
                (let*   . ,(λ (exp env) (eval (let*->nested-lets exp) env)))
                (letrec . ,(λ (exp env) (eval (letrec->let exp) env)))
-               (begin  . ,(λ (exp env) (eval-sequence (begin-actions exp) env)))
-               (cond   . ,(λ (exp env) (eval (cond->if exp) env))))))
-
-(define (eval exp env)
-  (cond ((self-evaluating? exp) exp)
-        ((variable? exp) (lookup-variable-value exp env))
-        ((quoted? exp) (text-of-quotation exp))
-        (else ((hash-ref eval-table
-                         (car exp)
-                         (λ () (λ (exp env) (apply2 (eval (operator exp) env)
-                                               (list-of-values (operands exp) env)))))
-               exp env))))
-
-
-; Previous eval function:
-#|
-(define (eval exp env)
-  (cond ((self-evaluating? exp) exp)
-        ((variable? exp) (lookup-variable-value exp env))
-        ((quoted? exp) (text-of-quotation exp))
-        ((assignment? exp) (eval-assignment exp env)) ;set!
-        ((definition? exp) (eval-definition exp env)) ;define
-        ((if? exp) (eval-if exp env))                 ;if
-        ((and? exp) (eval-and exp env)) ; added       ;and
-        ((or? exp) (eval-or exp env))   ; added       ;or
-        ((lambda? exp)                                ;lambda
-         (make-procedure (lambda-parameters exp)
-                         (lambda-body exp)
-                         env))
-        ((begin? exp)                                ;begin
-         (eval-sequence (begin-actions exp) env))
-        ((cond? exp) (eval (cond->if exp) env))      ;cond
-        ((application? exp)                          ;call
-         (apply2 (eval (operator exp) env)  ;;;;;;;;;;;;;;;; uses new version of "apply"
-                 (list-of-values (operands exp) env)))
-        (else
-         (error "Unknown expression type -- EVAL" exp))))
+               (begin  . ,(λ (exp env) (eval-sequence (begin-actions exp) env)));;;;;;;;;;;;
+               (cond   . ,(λ (exp env) (eval (cond->if exp) env)))))) ;;;;;;;;;;;;
 |#
+
+(define analyze-table
+  (make-hash `((set!   . ,(λ (exp) (analyze-assignment exp)))
+               (define . ,(λ (exp) (analyze-definition exp)))
+               (if     . ,(λ (exp) (analyze-if exp))) ;;;;;;;;;;;;;
+               (and    . ,(λ (exp) (analyze-and exp)))
+               (or     . ,(λ (exp) (analyze-or exp)))
+               (lambda . ,(λ (exp) (analyze-lambda exp)))
+               (let    . ,(λ (exp) (analyze (let->combination exp))))
+               (let*   . ,(λ (exp) (analyze (let*->nested-lets exp))))
+               (letrec . ,(λ (exp) (analyze (letrec->let exp))))
+               (begin  . ,(λ (exp) (analyze-sequence (begin-actions exp))))
+               (cond   . ,(λ (exp) (analyze (cond->if exp)))))))
+
+(define (analyze exp)
+  (cond ((self-evaluating? exp) (analyze-self-evaluating exp))
+        ((variable? exp) (analyze-variable exp))
+        ((quoted? exp) (analyze-quoted exp))
+        (else ((hash-ref analyze-table
+                         (car exp)
+                         (λ () (λ (exp) (analyze-application exp))))
+               exp))))
+
+(define (eval exp env)
+  ((analyze exp) env))
+
+(define (analyze-self-evaluating exp)
+  (λ (env) exp))
+
+(define (analyze-quoted exp)
+  (let ((qval (text-of-quotation exp)))
+    (λ (env) qval)))
+
+(define (analyze-variable exp)
+  (λ (env) (lookup-variable-value exp env)))
+
+(define (analyze-lambda exp)
+  (let ((vars (lambda-parameters exp))
+        (bproc (analyze-sequence (lambda-body exp))))
+    (λ (env) (make-procedure vars bproc env))))
+
+(define (analyze-application exp)
+  (let ((fproc (analyze (operator exp)))
+        (aprocs (map analyze (operands exp))))
+    (λ (env)
+      (execute-application (fproc env)
+                           (map (lambda (aproc) (aproc env))
+                                aprocs)))))
+
+(define (execute-application proc args)
+  (cond ((primitive-procedure? proc)
+         (apply-primitive-procedure proc args))
+        ((compound-procedure? proc)
+         ((procedure-body proc)
+          (extend-environment (procedure-parameters proc)
+                              args
+                              (procedure-environment proc))))
+        (else (error "Unknown procedure type -- EXECUTE-APPLICATION" proc))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#|
 (define (eval-sequence exps env)
   (cond ((last-exp? exps) (eval (first-exp exps) env))
         (else (eval (first-exp exps) env)
               (eval-sequence (rest-exps exps) env))))
+|#
+(define (analyze-sequence exps)
+  (define (sequentially proc1 proc2)
+    (λ (env) (proc1 env) (proc2 env)))
+  (define (loop first-proc rest-procs)
+    (if (null? rest-procs)
+        first-proc
+        (loop (sequentially first-proc (car rest-procs))
+              (cdr rest-procs))))
+  (let ((procs (map analyze exps)))
+    (if (null? procs)
+        (error "Empty sequence -- ANALYZE")
+        (loop (car procs) (cdr procs)))))
 
+
+
+
+#|
 (define (eval-assignment exp env)
   (set-variable-value! (assignment-variable exp)
                        (eval (assignment-value exp) env)
                        env)
   'ok)
+|#
+(define (analyze-assignment exp)
+  (let ((var (assignment-variable exp))
+        (vproc (analyze (assignment-value exp))))
+    (λ (env)
+      (set-variable-value! var (vproc env) env)
+      'ok)))
 
+
+
+
+#|
 (define (eval-definition exp env)
   (define-variable! (definition-variable exp)
                     (eval (definition-value exp) env)
                     env)
   'ok)
+|#
+(define (analyze-definition exp)
+  (let ((var (definition-variable exp))
+        (vproc (analyze (definition-value exp))))
+    (λ (env)
+      (define-variable! var (vproc env) env)
+      'ok)))
+
+
+
 
 #|
-(define (list-of-values exps env)
-  (if (no-operands? exps)
-      '()
-      (cons (eval (first-operand exps) env)
-            (list-of-values (rest-operands exps) env))))
-|#
-; version that enforces left-to-right:
 (define (list-of-values exps env)
   (if (no-operands? exps)
       '()
       (let* ((first-val (eval (first-operand exps) env))
              (rest-vals (list-of-values (rest-operands exps) env)))
         (cons first-val rest-vals))))
+|#
 
 
 
+#|
 (define (eval-if exp env)
   (if (true? (eval (if-predicate exp) env))
       (eval (if-consequent exp) env)
       (eval (if-alternative exp) env)))
+|#
+
+(define (analyze-if exp)
+  (let ((pproc (analyze (if-predicate exp)))
+        (cproc (analyze (if-consequent exp)))
+        (aproc (analyze (if-alternative exp))))
+    (λ (env)
+      (if (true? (pproc env))
+          (cproc env)
+          (aproc env)))))
+
+
+
+
+(define (and? exp) (tagged-list? exp 'and))
+(define (or? exp) (tagged-list? exp 'or))
+
+#|
+(define (eval-and exp env)
+  (let loop ((args (cdr exp)))
+    (cond ((null? args) 'true)
+          ((true? (eval (car args) env))
+           (loop (cdr args)))
+          (else 'false))))
+|#
+(define (analyze-and exp)
+  (let ((args (cdr exp)))
+    (if (null? args)
+        (analyze 'true)
+        (let ((first-arg (car args))
+              (rest-args (cdr args)))
+          (if (null? rest-args)
+              (analyze first-arg) ; (and x) = x
+              (analyze (make-if first-arg
+                                (cons 'and rest-args)
+                                'false)))))))
+                                
+#|
+(define (eval-or exp env)
+  (let loop ((args (cdr exp)))
+    (cond ((null? args) 'false)
+          ((true? (eval (car args) env)) 'true)
+          (else (loop (cdr args))))))
+|#
+(define (analyze-or exp)
+  (let ((args (cdr exp)))
+    (if (null? args)
+        (analyze 'false)
+        (let ((first-arg (car args))
+              (rest-args (cdr args)))
+          (if (null? rest-args)
+              (analyze first-arg) ; (or x) = x
+              (analyze (make-if first-arg
+                                first-arg
+                                (cons 'or rest-args))))))))
+
 
 
 (define input-prompt ";;; M-Eval input:")
@@ -509,24 +643,6 @@
                      (procedure-body object)
                      '<procedure-env>))
       (display object)))
-
-
-
-(define (and? exp) (tagged-list? exp 'and))
-(define (or? exp) (tagged-list? exp 'or))
-
-(define (eval-and exp env)
-  (let loop ((args (cdr exp)))
-    (cond ((null? args) 'true)
-          ((true? (eval (car args) env))
-           (loop (cdr args)))
-          (else 'false))))
-
-(define (eval-or exp env)
-  (let loop ((args (cdr exp)))
-    (cond ((null? args) 'false)
-          ((true? (eval (car args) env)) 'true)
-          (else (loop (cdr args))))))
 
 
 
