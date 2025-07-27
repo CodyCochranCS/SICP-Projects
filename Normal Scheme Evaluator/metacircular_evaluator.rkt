@@ -1,5 +1,6 @@
 #lang racket
 
+
 ;; underlying tag structure used throughout
 (define (tagged-list? exp tag)
   (if (pair? exp)
@@ -48,6 +49,38 @@
 (define (lambda-body exp) (cddr exp))
 
 
+(define (let? exp) (tagged-list? exp 'let))
+(define (let-bindings exp) (cadr exp))
+(define (let-body exp) (cddr exp))
+(define (let->combination exp)
+  (let loop ((params '())
+             (vals '())
+             (bindings (let-bindings exp)))
+    (if (null? bindings)
+        (cons (make-lambda params (let-body exp))
+              vals)
+        (let ((first (car bindings))
+              (rest  (cdr bindings)))
+          (loop (cons (car first) params)
+                (cons (cadr first) vals)
+                rest)))))
+
+(define (let*? exp) (tagged-list? exp 'let*))
+(define (let*-bindings exp) (cadr exp))
+(define (let*-body exp) (cddr exp))
+(define (let*->nested-lets exp)
+  (let ((bindings (let*-bindings exp)))
+    (if (null? bindings)
+        (cons 'let (cons '() (let*-body exp)))
+        (let recurse ((first-binding (car bindings))
+                      (rest-bindings (cdr bindings)))
+          (if (null? rest-bindings)
+              (cons 'let (cons (list first-binding) (let*-body exp)))
+              (list 'let
+                    (list first-binding)
+                    (recurse (car rest-bindings) (cdr rest-bindings))))))))
+
+
 (define (if? exp) (tagged-list? exp 'if))
 (define (if-predicate exp) (cadr exp))
 (define (if-consequent exp) (caddr exp))
@@ -71,16 +104,28 @@
         ((last-exp? seq) (first-exp seq))
         (else (make-begin seq))))
 
+
 (define (application? exp) (pair? exp))
 (define (operator exp) (car exp))
 (define (operands exp) (cdr exp))
+
+; Modified for exercise 4.2
+; (define (application? exp) (tagged-list? exp 'call))
+; (define (operator exp) (cadr exp))
+; (define (operands exp) (cddr exp))
+
+
+
 
 (define (no-operands? ops) (null? ops))
 (define (first-operand ops) (car ops))
 (define (rest-operands ops) (cdr ops))
 
+
 (define (cond? exp) (tagged-list? exp 'cond))
 (define (cond-clauses exp) (cdr exp))
+(define (cond-arrow-clause? clause)
+  (tagged-list? (cond-actions clause) '=>))
 (define (cond-else-clause? clause)
   (eq? (cond-predicate clause) 'else))
 (define (cond-predicate clause) (car clause))
@@ -91,14 +136,20 @@
       'false                          ; no else clause
       (let ((first (car clauses))
             (rest (cdr clauses)))
-        (if (cond-else-clause? first)
-            (if (null? rest)
-                (sequence->exp (cond-actions first))
-                (error "ELSE clause isn't last -- COND->IF"
-                       clauses))
-            (make-if (cond-predicate first)
-                     (sequence->exp (cond-actions first))
-                     (expand-clauses rest))))))
+        (cond ((cond-else-clause? first)
+               (if (null? rest)
+                   (sequence->exp (cond-actions first))
+                   (error "ELSE clause isn't last -- COND->IF"
+                          clauses)))
+              ((cond-arrow-clause? first)
+               (list 'let
+                     (list (list 'temp (cond-predicate first)))
+                     (make-if 'temp
+                              (list (cadr (cond-actions first)) 'temp)
+                              (expand-clauses rest))))
+              (else (make-if (cond-predicate first)
+                             (sequence->exp (cond-actions first))
+                             (expand-clauses rest)))))))
 
 (define (cond->if exp)
   (expand-clauses (cond-clauses exp)))
@@ -229,6 +280,12 @@
         (list 'cons cons)
         (list 'null? null?)
         (list '+ +)
+        (list '* *)
+        (list '- -)
+        (list '= =)
+        ; ....
+        (list 'assoc assoc)
+        (list 'cadr cadr)
         ; <more primitives>
         ))
 
@@ -253,7 +310,6 @@
   (apply ;; apply in underlying scheme
    (primitive-implementation proc) args))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; mutual requirements
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -272,28 +328,56 @@
          (error
           "Unknown procedure type -- APPLY" procedure))))
 
+
+(define eval-table
+  (make-hash `((set!   . ,(λ (exp env) (eval-assignment exp env)))
+               (define . ,(λ (exp env) (eval-definition exp env)))
+               (if     . ,(λ (exp env) (eval-if exp env)))
+               (and    . ,(λ (exp env) (eval-and exp env)))
+               (or     . ,(λ (exp env) (eval-or exp env)))
+               (lambda . ,(λ (exp env) (make-procedure (lambda-parameters exp)
+                                                       (lambda-body exp)
+                                                       env)))
+               (let    . ,(λ (exp env) (eval (let->combination exp) env)))
+               (let*   . ,(λ (exp env) (eval (let*->nested-lets exp) env)))
+               (begin  . ,(λ (exp env) (eval-sequence (begin-actions exp) env)))
+               (cond   . ,(λ (exp env) (eval (cond->if exp) env))))))
+
 (define (eval exp env)
   (cond ((self-evaluating? exp) exp)
         ((variable? exp) (lookup-variable-value exp env))
         ((quoted? exp) (text-of-quotation exp))
-        ((assignment? exp) (eval-assignment exp env))
-        ((definition? exp) (eval-definition exp env))
-        ((if? exp) (eval-if exp env))
-        ((and? exp) (eval-and exp env)) ; added
-        ((or? exp) (eval-or exp env))   ; added
-        ((lambda? exp)
+        (else ((hash-ref eval-table
+                         (car exp)
+                         (λ () (λ (exp env) (apply2 (eval (operator exp) env)
+                                               (list-of-values (operands exp) env)))))
+               exp env))))
+
+
+; Previous eval function:
+#|
+(define (eval exp env)
+  (cond ((self-evaluating? exp) exp)
+        ((variable? exp) (lookup-variable-value exp env))
+        ((quoted? exp) (text-of-quotation exp))
+        ((assignment? exp) (eval-assignment exp env)) ;set!
+        ((definition? exp) (eval-definition exp env)) ;define
+        ((if? exp) (eval-if exp env))                 ;if
+        ((and? exp) (eval-and exp env)) ; added       ;and
+        ((or? exp) (eval-or exp env))   ; added       ;or
+        ((lambda? exp)                                ;lambda
          (make-procedure (lambda-parameters exp)
                          (lambda-body exp)
                          env))
-        ((begin? exp) 
+        ((begin? exp)                                ;begin
          (eval-sequence (begin-actions exp) env))
-        ((cond? exp) (eval (cond->if exp) env))
-        ((application? exp)
+        ((cond? exp) (eval (cond->if exp) env))      ;cond
+        ((application? exp)                          ;call
          (apply2 (eval (operator exp) env)  ;;;;;;;;;;;;;;;; uses new version of "apply"
                  (list-of-values (operands exp) env)))
         (else
          (error "Unknown expression type -- EVAL" exp))))
-
+|#
 (define (eval-sequence exps env)
   (cond ((last-exp? exps) (eval (first-exp exps) env))
         (else (eval (first-exp exps) env)
@@ -332,7 +416,6 @@
   (if (true? (eval (if-predicate exp) env))
       (eval (if-consequent exp) env)
       (eval (if-alternative exp) env)))
-
 
 
 (define input-prompt ";;; M-Eval input:")
