@@ -1,6 +1,5 @@
 #lang racket
 
-
 ;; underlying tag structure used throughout
 (define (tagged-list? exp tag)
   (if (pair? exp)
@@ -50,20 +49,41 @@
 
 
 (define (let? exp) (tagged-list? exp 'let))
-(define (let-bindings exp) (cadr exp))
-(define (let-body exp) (cddr exp))
+(define (named-let? exp)
+  (and (let? exp) (symbol? (cadr exp))))
+(define (let-name exp)
+  (if (named-let? exp)
+      (cadr exp)
+      (error "Attempt to get name of non-name let -- " exp)))
+(define (let-bindings exp)
+  (if (named-let? exp)
+      (caddr exp)
+      (cadr exp)))
+(define (let-body exp)
+  (if (named-let? exp)
+      (cdddr exp)
+      (cddr exp)))
 (define (let->combination exp)
   (let loop ((params '())
              (vals '())
              (bindings (let-bindings exp)))
     (if (null? bindings)
-        (cons (make-lambda params (let-body exp))
-              vals)
+        (let ((lambda-proc (make-lambda (reverse params) (let-body exp)))
+              (vals (reverse vals)))
+          (if (named-let? exp)
+              (let ((name (let-name exp)))
+                (list (list 'lambda '()
+                            (list 'define name lambda-proc)
+                            (cons name vals))))
+              (cons lambda-proc vals)))
         (let ((first (car bindings))
               (rest  (cdr bindings)))
           (loop (cons (car first) params)
                 (cons (cadr first) vals)
                 rest)))))
+
+(define (make-let bindings body)
+  (cons 'let (cons bindings body))) ; can't use list since last item is already list
 
 (define (let*? exp) (tagged-list? exp 'let*))
 (define (let*-bindings exp) (cadr exp))
@@ -71,14 +91,39 @@
 (define (let*->nested-lets exp)
   (let ((bindings (let*-bindings exp)))
     (if (null? bindings)
-        (cons 'let (cons '() (let*-body exp)))
-        (let recurse ((first-binding (car bindings))
+        ;(cons 'let (cons '() (let*-body exp)))
+        (make-let '() (let*-body exp))
+        (let recurse ((first-binding (list (car bindings)))
                       (rest-bindings (cdr bindings)))
           (if (null? rest-bindings)
-              (cons 'let (cons (list first-binding) (let*-body exp)))
-              (list 'let
-                    (list first-binding)
-                    (recurse (car rest-bindings) (cdr rest-bindings))))))))
+              ;(cons 'let (cons (list first-binding) (let*-body exp)))
+              (make-let first-binding (let*-body exp))
+              (make-let first-binding
+                    (list (recurse (list (car rest-bindings)) (cdr rest-bindings)))))))))
+
+
+(define (letrec? exp) (tagged-list? exp 'letrec))
+(define (letrec-bindings exp) (cadr exp))
+(define (letrec-body exp) (cddr exp))
+(define (letrec->let exp)
+  (let ((bindings (letrec-bindings exp))
+        (body (letrec-body exp)))
+    (if (null? bindings)
+        (make-let '() body)
+        (let recurse ((bindings bindings)
+                      (unassigned-list '())
+                      (set-list '()))
+          (if (null? bindings)
+              (make-let (reverse unassigned-list)  ; Reversing may not be necessary
+                        (append (reverse set-list) ; but just in case....
+                                body))
+              (let ((first-binding (car bindings)))
+                (recurse (cdr bindings)
+                         (cons (list (car first-binding) (quote '*unassigned*))
+                               unassigned-list)           ; (u <e1>) -> (u '*unassigned*)
+                         (cons (cons 'set! first-binding) ; (u <e1>) -> (set! u <e1>)
+                               set-list))))))))
+
 
 
 (define (if? exp) (tagged-list? exp 'if))
@@ -154,9 +199,28 @@
 (define (cond->if exp)
   (expand-clauses (cond-clauses exp)))
 
+(define (scan-out-defines body)
+  (let loop ((definitions '())
+             (body body))
+    (if (tagged-list? (car body) 'define)
+        (loop (cons (cdar body) definitions)
+              (cdr body))
+        (if (null? definitions)
+            body
+            (let loop ((definitions definitions)
+                       (let-bindings '())
+                       (body body))
+              (if (null? definitions)
+                  (list (cons 'let (cons let-bindings body)))
+                  (let ((current-definition (car definitions)))
+                    (loop (cdr definitions)
+                          (cons (list (car current-definition) (list 'quote '*unassigned*)) let-bindings)
+                          (cons (cons 'set! current-definition) body)))))))))
+
 
 (define (make-procedure parameters body env)
-  (list 'procedure parameters body env))
+  (list 'procedure parameters (scan-out-defines body) env)) ; modify "body" -> "(scan-out-defines body)"
+
 
 (define (compound-procedure? p)
   (tagged-list? p 'procedure))
@@ -216,13 +280,17 @@
                 (frame-values frame)))))
   (env-loop env))
 |#
+
 (define (lookup-variable-value var env)
   (define (env-loop env)
     (if (eq? env the-empty-environment)
         (error "Unbound variable" var)
         (let ((frame (first-frame env)))
           (if (hash-has-key? frame var)
-              (hash-ref frame var)
+              (let ((val (hash-ref frame var)))
+                (if (eq? val '*unassigned*)
+                    (error "Unassigned variable - " var)
+                    val))
               (env-loop (enclosing-environment env))))))
   (env-loop env))
 
@@ -340,6 +408,7 @@
                                                        env)))
                (let    . ,(λ (exp env) (eval (let->combination exp) env)))
                (let*   . ,(λ (exp env) (eval (let*->nested-lets exp) env)))
+               (letrec . ,(λ (exp env) (eval (letrec->let exp) env)))
                (begin  . ,(λ (exp env) (eval-sequence (begin-actions exp) env)))
                (cond   . ,(λ (exp env) (eval (cond->if exp) env))))))
 
@@ -462,5 +531,5 @@
 
 
 
-(driver-loop)
+; (driver-loop)
 
